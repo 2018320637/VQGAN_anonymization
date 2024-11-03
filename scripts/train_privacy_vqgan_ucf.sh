@@ -1,0 +1,36 @@
+#!/bin/bash
+cd ..
+OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port 29506 vqgan_privacy_ddp_amp.py \
+    --src 'ucf' \
+    --tar 'hmdb' \
+    --num_frames 16 \
+    --sample_every_n_frames 2 \
+    --num_workers 8 \
+    --batch_size 8 \
+    --v_batch_size 8 \
+    --learning_rate 0.0001 \
+    --learning_rate_privacy 0.001 \
+    --num_epochs 500 \
+    --val_freq 5 \
+    --reso_h 128 \
+    --reso_w 128 \
+    --embedding_dim 256 \
+    --n_codes 16384 \
+    --n_hiddens 32 \
+    --downsample 4 8 8 \
+    --disc_channels 64 \
+    --disc_layers 3 \
+    --discriminator_iter_start 50 \
+    --disc_loss_type hinge \
+    --image_gan_weight 1.0 \
+    --video_gan_weight 1.0 \
+    --l1_weight 4.0 \
+    --gan_feat_weight 4.0 \
+    --perceptual_weight 4.0 \
+    --weight_class \
+    --restart_thres 1.0 \
+    --no_random_restart \
+    --norm_type batch \
+    --padding_type replicate \
+    --self_pretrained_vqgan '/home/zhiwei/source/SPAct/anonymization_training/saved_models/vqgan/train_vqgan_ucf_frames_16_every_2_bs_8_lr_0.0001_amp_codes_16384_dis_iter_50/model.pth' \
+    --self_pretrained_privacy '/home/zhiwei/source/SPAct/anonymization_training/saved_models/train_privacy_ucf2hmdb_frames_16_bs_32_lr_0.001/model_ucf2ucf_90_cMAP_0.6881493280207411.pth'

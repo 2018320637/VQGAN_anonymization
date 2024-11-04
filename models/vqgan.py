@@ -149,7 +149,7 @@ class VQGAN(nn.Module):
         
         else:
             perceptual_loss = self.perceptual_model(frames, frames_recon).mean() * self.perceptual_weight
-            return recon_loss, x_recon, vq_output, perceptual_loss
+            return recon_loss, x_recon, vq_output_static, vq_output_dynamic, perceptual_loss
 
 
 

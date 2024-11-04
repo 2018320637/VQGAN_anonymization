@@ -29,7 +29,6 @@ def seed_everything(seed=1234):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
 
-
 def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, triplet_loss, use_cuda, epoch, opts, writer=None, local_rank=None):
 
     optimizer_idx = 0
@@ -38,23 +37,20 @@ def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc,
     losses_triplet = []
 
     model.train()
+    triplet_disc.train()
+    
     disc_factor = adopt_weight(epoch, threshold=opts.discriminator_iter_start)
     triplet_factor = adopt_weight(epoch, threshold=opts.triplet_iter_start)
-    
-    idx = 0
-    loop = tqdm(train_loader, total=len(train_loader)) if dist.get_rank() == 0 else train_loader
 
+    loop = tqdm(train_loader, total=len(train_loader)) if dist.get_rank() == 0 else train_loader
     scaler = GradScaler()
-    
+
+    idx = 0
     for data in loop:
         idx += 1
         if use_cuda:
             inputs_ancher = data[0].to(local_rank)
-            inputs_pos = data[3].to(local_rank)
-            inputs_neg = data[4].to(local_rank)
             inputs_ancher = inputs_ancher.permute(0,2,1,3,4)
-            inputs_pos = inputs_pos.permute(0,2,1,3,4)
-            inputs_neg = inputs_neg.permute(0,2,1,3,4)
 
         if optimizer_idx == 0:
 
@@ -68,7 +64,6 @@ def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc,
             scaler.scale(loss).backward()
             scaler.step(optimizer_ae)
             scaler.update()
-            optimizer_idx = 1
             
             if dist.get_rank() == 0:
                 writer.add_scalar("train/recon_loss", recon_loss, epoch*len(train_loader)+idx)
@@ -79,6 +74,8 @@ def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc,
                 writer.add_scalar("train/gan_feat_loss", gan_feat_loss, epoch*len(train_loader)+idx)
                 loop.set_description(f'Epoch [{epoch}/{opts.num_epochs}]')
                 loop.set_postfix({'loss_recon': recon_loss.item()})
+            
+            optimizer_idx = 1
 
         if optimizer_idx == 1:
             if disc_factor > 0:
@@ -93,44 +90,52 @@ def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc,
                 scaler.scale(loss).backward()
                 scaler.step(optimizer_disc)
                 scaler.update()
-                optimizer_idx = 0
+
                 if dist.get_rank() == 0:
                     writer.add_scalar("train/discloss", discloss, epoch*len(train_loader)+idx)
                     loop.set_description(f'Epoch [{epoch}/{opts.num_epochs}]')
                     loop.set_postfix({'loss_disc': loss.item()})
+
+                optimizer_idx = 2
             else:
                 optimizer_idx = 2
         
         if optimizer_idx == 2:
 
             if triplet_factor > 0:
-                ancher_static, _ = model(inputs_ancher, optimizer_idx)
-                pos_static, _ = model(inputs_pos, optimizer_idx)
-                neg_static, _ = model(inputs_neg, optimizer_idx)
-
-                ancher_feature_static = triplet_disc(ancher_static)
-                pos_feature_static = triplet_disc(pos_static)
-                neg_feature_static = triplet_disc(neg_static)
+                inputs_pos = data[3].to(local_rank)
+                inputs_neg = data[4].to(local_rank)
+                inputs_pos = inputs_pos.permute(0,2,1,3,4)
+                inputs_neg = inputs_neg.permute(0,2,1,3,4)
+                with autocast():
+                    ancher_static, _ = model(inputs_ancher, optimizer_idx)
+                    pos_static, _ = model(inputs_pos, optimizer_idx)
+                    neg_static, _ = model(inputs_neg, optimizer_idx)
+ 
+                    ancher_feature_static = triplet_disc(ancher_static)
+                    pos_feature_static = triplet_disc(pos_static)
+                    neg_feature_static = triplet_disc(neg_static)
 
                 triplet_loss = triplet_loss(ancher_feature_static, pos_feature_static, neg_feature_static)
                 losses_triplet.append(triplet_loss.item())
 
                 optimizer_triplet.zero_grad()
-                optimizer_disc.zero_grad()
                 optimizer_ae.zero_grad()
                 scaler.scale(triplet_loss).backward()
                 scaler.step(optimizer_triplet)
-                scaler.step(optimizer_disc)
                 scaler.step(optimizer_ae)
                 scaler.update()
 
-                optimizer_idx = 0
                 if dist.get_rank() == 0:
                     writer.add_scalar("train/triplet_loss", triplet_loss, epoch*len(train_loader)+idx)
                     loop.set_description(f'Epoch [{epoch}/{opts.num_epochs}]')
                     loop.set_postfix({'loss_triplet': triplet_loss.item()})
+                
+                optimizer_idx = 0
+
             else:
                 optimizer_idx = 0
+
 
     if dist.get_rank() == 0:
         print('Training Epoch: %d, loss_ae: %.4f, loss_disc: %.4f, loss_triplet: %.4f' % (epoch, np.mean(losses_ae), np.mean(losses_disc), np.mean(losses_triplet)))
@@ -184,10 +189,16 @@ def train_vqgan(opts, local_rank):
     run_id = opts.run_id
     if dist.get_rank() == 0:
         print(f'run id============ {run_id} =============')
-        writer = SummaryWriter(os.path.join(cfg.logs, str(run_id)))
-        save_dir = os.path.join(cfg.saved_models_dir, run_id)
+        save_dir = os.path.join(cfg.save_dir_vqgan_pretrain, str(run_id))
+
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
+
+        params_file = os.path.join(save_dir, 'hyper_params.txt')
+        with open(params_file, 'w') as f:
+            for arg in vars(opts):
+                f.write(f'{arg}: {getattr(opts, arg)}\n')
+        writer = SummaryWriter(save_dir)
 
 
     #=================================prepare dataset============================================
@@ -226,12 +237,16 @@ def train_vqgan(opts, local_rank):
     #================================end of dataset preparation=================================
 
     model = VQGAN(opts)
-    triplet_disc = ShuffleDiscriminator(opts.embedding_dim, num_domains=2)
+    triplet_disc = ShuffleDiscriminator(opts.embedding_dim_static, opts.embedding_dim_static)
+
+
     model = model.to(local_rank)
     triplet_disc = triplet_disc.to(local_rank)
 
+
     model = DDP(model, device_ids=[local_rank], output_device=local_rank,broadcast_buffers=False, find_unused_parameters=True)
     triplet_disc = DDP(triplet_disc, device_ids=[local_rank], output_device=local_rank,broadcast_buffers=False)
+
 
     optimizer_ae = torch.optim.Adam(list(model.module.encoder.parameters()) +
                                 list(model.module.decoder.parameters()) +
@@ -248,7 +263,7 @@ def train_vqgan(opts, local_rank):
     triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2).to(local_rank)
 
     for epoch in range(0, opts.num_epochs):
-        if local_rank == 0:
+        if dist.get_rank() == 0:
             print(f'Epoch {epoch} started')
             start=time.time()
 
@@ -257,19 +272,20 @@ def train_vqgan(opts, local_rank):
             train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, triplet_loss, use_cuda, epoch, opts, writer = writer, local_rank = local_rank)
         else:
             train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, triplet_loss, use_cuda, epoch, opts, local_rank = local_rank)
+        
         if epoch % opts.val_freq == 0:
+
             if dist.get_rank() == 0:
                 val_epoch(model, val_loader, use_cuda, epoch, writer = writer, local_rank = local_rank)
-            else:
-                val_epoch(model, val_loader, use_cuda, epoch, local_rank=local_rank)
-            if dist.get_rank() == 0: 
-                save_file_path = os.path.join(save_dir, 'model.pth')
+
+                save_file_path = os.path.join(save_dir, f'model_{epoch}.pth')
                 states = {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                 }
                 torch.save(states, save_file_path)
-        
+
+        dist.barrier()
         if local_rank == 0:
             taken = time.time()-start
             print(f'Time taken for Epoch-{epoch} is {taken}')
@@ -291,10 +307,12 @@ if __name__ == '__main__':
     parser.add_argument("--learning_rate", dest='learning_rate', type=float, required=False, default=1e-4, help='Learning rate')
     parser.add_argument("--num_epochs", dest='num_epochs', type=int, required=False, default=300, help='Number of epochs')
     parser.add_argument("--val_freq", dest='val_freq', type=int, required=False, default=10, help='Validation frequency')
+    parser.add_argument("--self_pretrained_action", dest='self_pretrained_action', type=str, required=False, default=None, help='Self-pretrained action model')
     #=================DATA PARAMETERS=================
     parser.add_argument("--reso_h", dest='reso_h', type=int, required=False, default=128, help='Resolution height')
     parser.add_argument("--reso_w", dest='reso_w', type=int, required=False, default=128, help='Resolution width')
     parser.add_argument("--triple", dest='triple', type=int, required=False, default=1, help='Use triple sampling') #用于控制是否使用triplet loss
+    parser.add_argument("--num_classes_action", dest='num_classes_action', type=int, required=False, default=51, help='Number of action classes')
     #=================VQGAN PARAMETERS=================
     parser.add_argument('--embedding_dim_dynamic', type=int, default=256)
     parser.add_argument('--embedding_dim_static', type=int, default=256)
@@ -307,6 +325,7 @@ if __name__ == '__main__':
     parser.add_argument('--disc_layers', type=int, default=3)
     parser.add_argument('--discriminator_iter_start', type=int, default=10)
     parser.add_argument('--triplet_iter_start', type=int, default=20) # 用于控制什么时候开始使用triplet loss来分离动态和静态信息
+    parser.add_argument('--action_iter_start', type=int, default=30)
     parser.add_argument('--disc_loss_type', type=str, default='hinge', choices=['hinge', 'vanilla'])
     parser.add_argument('--image_gan_weight', type=float, default=1.0)
     parser.add_argument('--video_gan_weight', type=float, default=1.0)

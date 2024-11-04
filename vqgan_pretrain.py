@@ -17,19 +17,28 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 from models.shuffle_discriminator import ShuffleDiscriminator
+from torchvision.utils import save_image
+import torchvision
+from PIL import Image
 
 warnings.filterwarnings("ignore")
 
 def seed_everything(seed=1234):
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # 或者 ':16:8'
+
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
 
-def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, triplet_loss, use_cuda, epoch, opts, writer=None, local_rank=None):
+    # torch.use_deterministic_algorithms(True)
+
+def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, criterion_triplet, use_cuda, epoch, opts, writer=None, local_rank=None):
 
     optimizer_idx = 0
     losses_ae = []
@@ -37,6 +46,7 @@ def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc,
     losses_triplet = []
 
     model.train()
+    model.module.perceptual_model.eval()
     triplet_disc.train()
     
     disc_factor = adopt_weight(epoch, threshold=opts.discriminator_iter_start)
@@ -116,7 +126,7 @@ def train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc,
                     pos_feature_static = triplet_disc(pos_static)
                     neg_feature_static = triplet_disc(neg_static)
 
-                triplet_loss = triplet_loss(ancher_feature_static, pos_feature_static, neg_feature_static)
+                triplet_loss = criterion_triplet(ancher_feature_static, pos_feature_static, neg_feature_static)
                 losses_triplet.append(triplet_loss.item())
 
                 optimizer_triplet.zero_grad()
@@ -156,15 +166,15 @@ def val_epoch(model, val_loader, use_cuda, epoch, writer=None, local_rank=None):
             if use_cuda:
                 inputs = inputs.to(local_rank)
 
-            with torch.no_grad():
+            with torch.no_grad(), autocast():
                 outputs = inputs.permute(0,2,1,3,4)
-                recon_loss, x_recon, vq_output, perceptual_loss = model(outputs)
+                recon_loss, x_recon, vq_output_static, vq_output_dynamic, perceptual_loss = model(outputs)
                 recon_losses.append(recon_loss.item())
                 if dist.get_rank() == 0:
                     writer.add_scalar("val/recon_loss", recon_loss, epoch*len(val_loader)+idx)
                     writer.add_scalar("val/perceptual_loss", perceptual_loss, epoch*len(val_loader)+idx)
-                    writer.add_scalar("val/perplexity", vq_output['perplexity'], epoch*len(val_loader)+idx)
-                    writer.add_scalar("val/commitment_loss", vq_output['commitment_loss'], epoch*len(val_loader)+idx)
+                    writer.add_scalar("val/perplexity", vq_output_static['perplexity'], epoch*len(val_loader)+idx)
+                    writer.add_scalar("val/commitment_loss", vq_output_dynamic['commitment_loss'], epoch*len(val_loader)+idx)
                 if idx == 1:
                     tmp = []
                     for batch_idx in range(x_recon.shape[0]):
@@ -182,6 +192,48 @@ def val_epoch(model, val_loader, use_cuda, epoch, writer=None, local_rank=None):
 
     return np.mean(recon_losses)
 
+def val_visualization(save_dir, epoch, validation_dataloader, model, local_rank):
+    """Visualize and save reconstruction results
+    Args:
+        save_dir (str): Directory to save visualization results
+        epoch (int): Current epoch number
+        validation_dataloader: Validation data loader
+        model: VQGAN model
+        local_rank: Device rank for distributed training
+    """
+    model.eval()
+    for i, data in enumerate(validation_dataloader):
+        if len(data[0].shape) == 1:
+            continue
+            
+        inputs = data[0].to(local_rank)
+        inputs = inputs.permute(0,2,1,3,4)  # [B,T,C,H,W] -> [B,C,T,H,W]
+        
+        with torch.no_grad(), autocast():
+            _, x_recon, _, _, _ = model(inputs)
+            
+            inputs = inputs.permute(0,2,1,3,4)  # [B,C,T,H,W] -> [B,T,C,H,W]
+            outputs = x_recon.permute(0,2,1,3,4)
+            
+            input_frames = inputs[:,0,:,:,:].squeeze(1)   # [B,C,H,W]
+            output_frames = outputs[:,0,:,:,:].squeeze(1)  # [B,C,H,W]
+            
+            vis_frames = torch.cat([input_frames, output_frames], dim=0)  # [2B,C,H,W]
+            vis_frames = torch.clamp(vis_frames, -0.5, 0.5)  # Clamp values
+            
+            grid = torchvision.utils.make_grid(vis_frames, nrow=inputs.shape[0], padding=2)
+            
+            # Convert from [-0.5,0.5] to [0,255]
+            grid = grid + 0.5  # [-0.5,0.5] -> [0,1]
+            grid = grid.transpose(0,1).transpose(1,2)  # [C,H,W] -> [H,W,C]
+            grid = grid.cpu().numpy()
+            grid = (grid * 255).astype(np.uint8)
+            
+            filename = f"recon_e{epoch:04d}_b{i:04d}.png"
+            path = os.path.join(save_dir, filename)
+            Image.fromarray(grid).save(path)
+            
+            break  # Only save first batch
 
 def train_vqgan(opts, local_rank):
     use_cuda = True
@@ -250,9 +302,11 @@ def train_vqgan(opts, local_rank):
 
     optimizer_ae = torch.optim.Adam(list(model.module.encoder.parameters()) +
                                 list(model.module.decoder.parameters()) +
-                                list(model.module.pre_vq_conv.parameters()) +
+                                list(model.module.pre_vq_conv_dynamic.parameters()) +
+                                list(model.module.pre_vq_conv_static.parameters()) +
                                 list(model.module.post_vq_conv.parameters()) +
-                                list(model.module.codebook.parameters()),
+                                list(model.module.codebook_dynamic.parameters()) +
+                                list(model.module.codebook_static.parameters()),
                                 lr=opts.learning_rate, betas=(0.5, 0.9))
     optimizer_disc = torch.optim.Adam(list(model.module.image_discriminator.parameters()) +
                                 list(model.module.video_discriminator.parameters()),
@@ -260,7 +314,11 @@ def train_vqgan(opts, local_rank):
     optimizer_triplet = torch.optim.Adam(list(triplet_disc.parameters()),
                                 lr=opts.learning_rate, betas=(0.5, 0.9))
 
-    triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2).to(local_rank)
+    # lr_scheduler_ae = torch.optim.lr_scheduler.StepLR(optimizer_ae, step_size=100, gamma=0.1)
+    # lr_scheduler_disc = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=100, gamma=0.1)
+    # lr_scheduler_triplet = torch.optim.lr_scheduler.StepLR(optimizer_triplet, step_size=100, gamma=0.1)
+
+    criterion_triplet = nn.TripletMarginLoss(margin=1.0, p=2).to(local_rank)
 
     for epoch in range(0, opts.num_epochs):
         if dist.get_rank() == 0:
@@ -269,15 +327,15 @@ def train_vqgan(opts, local_rank):
 
         train_loader.sampler.set_epoch(epoch)
         if dist.get_rank() == 0:
-            train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, triplet_loss, use_cuda, epoch, opts, writer = writer, local_rank = local_rank)
+            train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, criterion_triplet, use_cuda, epoch, opts, writer = writer, local_rank = local_rank)
         else:
-            train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, triplet_loss, use_cuda, epoch, opts, local_rank = local_rank)
+            train_epoch(model, triplet_disc, train_loader, optimizer_ae, optimizer_disc, optimizer_triplet, criterion_triplet, use_cuda, epoch, opts, local_rank = local_rank)
         
         if epoch % opts.val_freq == 0:
 
             if dist.get_rank() == 0:
                 val_epoch(model, val_loader, use_cuda, epoch, writer = writer, local_rank = local_rank)
-
+                val_visualization(save_dir, epoch, val_loader, model, local_rank)
                 save_file_path = os.path.join(save_dir, f'model_{epoch}.pth')
                 states = {
                     'epoch': epoch,
@@ -289,7 +347,7 @@ def train_vqgan(opts, local_rank):
         if local_rank == 0:
             taken = time.time()-start
             print(f'Time taken for Epoch-{epoch} is {taken}')
-    
+ 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
@@ -307,12 +365,10 @@ if __name__ == '__main__':
     parser.add_argument("--learning_rate", dest='learning_rate', type=float, required=False, default=1e-4, help='Learning rate')
     parser.add_argument("--num_epochs", dest='num_epochs', type=int, required=False, default=300, help='Number of epochs')
     parser.add_argument("--val_freq", dest='val_freq', type=int, required=False, default=10, help='Validation frequency')
-    parser.add_argument("--self_pretrained_action", dest='self_pretrained_action', type=str, required=False, default=None, help='Self-pretrained action model')
     #=================DATA PARAMETERS=================
     parser.add_argument("--reso_h", dest='reso_h', type=int, required=False, default=128, help='Resolution height')
     parser.add_argument("--reso_w", dest='reso_w', type=int, required=False, default=128, help='Resolution width')
-    parser.add_argument("--triple", dest='triple', type=int, required=False, default=1, help='Use triple sampling') #用于控制是否使用triplet loss
-    parser.add_argument("--num_classes_action", dest='num_classes_action', type=int, required=False, default=51, help='Number of action classes')
+    parser.add_argument("--triple", dest='triple', type=int, required=False, default=1, help='Use triple sampling')
     #=================VQGAN PARAMETERS=================
     parser.add_argument('--embedding_dim_dynamic', type=int, default=256)
     parser.add_argument('--embedding_dim_static', type=int, default=256)
@@ -342,7 +398,7 @@ if __name__ == '__main__':
     seed_everything(1234)
 
     opts = parser.parse_args()
-    opts.run_id = f'train_vqgan_{opts.src}_frames_{opts.num_frames}_every_{opts.sample_every_n_frames}_bs_{opts.batch_size}_lr_{opts.learning_rate}_amp_codes_{opts.n_codes}_dis_iter_{opts.discriminator_iter_start}'
+    opts.run_id = f'{opts.src}_frames_{opts.num_frames}_every_{opts.sample_every_n_frames}_bs_{opts.batch_size}_lr_{opts.learning_rate}_codes_s_{opts.n_codes_static}_codes_d_{opts.n_codes_dynamic}_dis_iter_{opts.discriminator_iter_start}_tri_iter_{opts.triplet_iter_start}'
 
 ##########################和DDP有关的参数################################
     local_rank = int(os.getenv("LOCAL_RANK", 0))

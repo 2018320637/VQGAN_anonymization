@@ -1,16 +1,16 @@
 #!/bin/bash
 cd ..
 OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port 29501 vqgan_pretrain.py \
-    --src 'ucf' \
-    --tar 'hmdb' \
+    --src 'hmdb' \
+    --tar 'ucf' \
     --num_frames 16 \
     --sample_every_n_frames 2 \
     --num_workers 8 \
     --batch_size 8 \
     --v_batch_size 8 \
     --learning_rate 0.0001 \
-    --num_epochs 500 \
-    --val_freq 10 \
+    --num_epochs 300 \
+    --val_freq 5 \
     --reso_h 128 \
     --reso_w 128 \
     --triple 1 \

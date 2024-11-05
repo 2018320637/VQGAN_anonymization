@@ -9,14 +9,14 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --mas
     --batch_size 8 \
     --v_batch_size 8 \
     --train_backbone \
-    --architecture 'vit' \
+    --architecture 'resnet50' \
     --learning_rate_fa 0.0001 \
     --learning_rate_fb 0.001 \
     --learning_rate_ft 0.001 \
     --learning_rate_disc 0.001 \
     --learning_rate_domain 0.001 \
     --learning_rate_triplet 0.001 \
-    --num_epochs 500 \
+    --num_epochs 200 \
     --val_freq 5 \
     --reso_h 128 \
     --reso_w 128 \
@@ -29,9 +29,10 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --mas
     --downsample 4 8 8 \
     --disc_channels 64 \
     --disc_layers 3 \
-    --discriminator_iter_start 50 \
-    --triplet_iter_start 30 \
-    --domain_iter_start 30 \
+    --discriminator_iter_start 200 \
+    --recon_iter_start 0 \
+    --triplet_iter_start 15 \
+    --domain_iter_start 25 \
     --disc_loss_type hinge \
     --image_gan_weight 1.0 \
     --video_gan_weight 1.0 \
@@ -41,11 +42,11 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --mas
     --action_weight 1.0 \
     --privacy_weight 1.0 \
     --weight_class_action 1 \
-    --weight_class_privacy 1 \
+    --weight_class_privacy 0 \
     --restart_thres 1.0 \
     --no_random_restart \
     --norm_type batch \
-    --padding_type replicate
-    # --self_pretrained_vqgan '/home/zhiwei/source/SPAct/anonymization_training/saved_models/vqgan/train_vqgan_ucf_frames_16_every_2_bs_8_lr_0.0001_amp_codes_16384_dis_iter_50/model.pth' \
-    # --self_pretrained_action '/home/zhiwei/source/SPAct/anonymization_training/action_logs_vqgan/action_vqgan_amp_ucf_frames_16_every_2_bs_8_lr_0.0002_lr_action_0.002_codes_16384_dis_iter_50_/model_0.9510.pth' \
-    # --self_pretrained_privacy '/home/zhiwei/source/SPAct/anonymization_training/privacy_logs_vqgan/privacy_vqgan_ucf_frames_16_every_2_bs_8_lr_0.0001_lr_privacy_0.001_codes_16384_dis_iter_50/model_0.6858_0.4815.pth'
+    --padding_type replicate \
+    --self_pretrained_vqgan '/home/zhiwei/source/SPAct/VQGAN_anonymization/logs/vqgan_pretrain/ucf_frames_16_every_2_bs_10_lr_0.0001_codes_s_2048_codes_d_16384_dis_iter_50_tri_iter_10/model_230.pth' \
+    --self_pretrained_action '/home/zhiwei/source/SPAct/anonymization_training/action_da_logs_vqgan/train_action_da_ucf2hmdb_frames_16_bs_30_lr_0.005_optimizer_sgd_action_1.0_pseudo_1.0_entropy_0.0_domain_1.0_th_0.95/model_ucf2ucf_50_acc_0.9947460595446584.pth' \
+    --self_pretrained_privacy '/home/zhiwei/source/SPAct/anonymization_training/experiments/privacy_logs/train_privacy_resnet50_ucf_frames_16_bs_64_lr_0.005/model_ucf_90_cMAP_0.7000590653721241.pth'

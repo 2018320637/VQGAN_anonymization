@@ -65,7 +65,7 @@ def load_ft(opts, local_rank):
         for layer_name, weights in pretrained_kvpair.items():
             layer_name = layer_name.replace('module.','')
             model_kvpair[layer_name] = weights   
-        model.load_state_dict(model_kvpair, strict=True)
+        model.load_state_dict(model_kvpair, strict=False)
         print(f'action model loaded successsfully!')
 
     return model
@@ -79,7 +79,7 @@ def load_fa(opts, local_rank):
         for layer_name, weights in pretrained_kvpair.items():
             layer_name = layer_name.replace('module.','')
             model_kvpair[layer_name] = weights   
-        model.load_state_dict(model_kvpair, strict=True)
+        model.load_state_dict(model_kvpair, strict=False)
         print(f'vqgan loaded successsfully!')
     return model
 
@@ -94,7 +94,7 @@ def load_fb(opts, local_rank):
 
     if opts.self_pretrained_privacy:
         weights = torch.load(opts.self_pretrained_privacy, map_location=f'cuda:{local_rank}')
-        model.load_state_dict(weights["privacy_model_state_dict"], strict=True)
+        model.load_state_dict(weights["privacy_model_state_dict"], strict=False)
         print("privacy model {} loaded successfully".format(opts.architecture))
 
     return model
@@ -110,14 +110,12 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
     disc_factor = adopt_weight(epoch, threshold=opts.discriminator_iter_start)
     triplet_factor = adopt_weight(epoch, threshold=opts.triplet_iter_start)
     domain_factor = adopt_weight(epoch, threshold=opts.domain_iter_start)
+    recon_factor = adopt_weight(epoch, threshold=opts.recon_iter_start)
 
     scaler = GradScaler()
     total_iters = len(train_loader_src)
     data_target_iter = cycle(train_loader_tar)
     loop = tqdm(train_loader_src, total=total_iters) if dist.get_rank() == 0 else train_loader_src
-
-    model.train()
-    unfix_model(model)
 
     step = 0
     for data in loop:
@@ -127,6 +125,8 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
         inputs_neg = data[4].to(local_rank)
         action_labels = data[1].to(local_rank)
         privacy_labels = data[2].to(local_rank)
+        privacy_labels = privacy_labels.unsqueeze(1).expand(-1, inputs_ancher.size(1), -1)
+        privacy_labels = privacy_labels.reshape(-1, privacy_labels.size(2))
         inputs_ancher = inputs_ancher.permute(0,2,1,3,4)
         inputs_pos = inputs_pos.permute(0,2,1,3,4)
         inputs_neg = inputs_neg.permute(0,2,1,3,4)
@@ -142,26 +142,29 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
         #==========================step 1=============================================
         if step % 2 == 0:
             #==========================recon loss src=================================
-            with autocast():
-                recon_loss, commitment_loss_static, commitment_loss_dynamic, aeloss, perceptual_loss, gan_feat_loss = model(inputs_ancher, 0)
-                loss = recon_loss + commitment_loss_static + commitment_loss_dynamic + disc_factor * (aeloss + gan_feat_loss) + perceptual_loss
-            
-            losses_recon.append(recon_loss.item())
-            optimizer_ae.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer_ae)
-            scaler.update()
+            if recon_factor > 0:
+                model.train()
+                unfix_model(model)
+                with autocast():
+                    recon_loss, commitment_loss_static, commitment_loss_dynamic, aeloss, perceptual_loss, gan_feat_loss = model(inputs_ancher, 0)
+                    loss = recon_loss + commitment_loss_static + commitment_loss_dynamic + disc_factor * (aeloss + gan_feat_loss) + perceptual_loss
                 
-            if dist.get_rank() == 0:
-                writer.add_scalar("train/recon_loss", recon_loss, epoch*len(train_loader_src)+step)
-                writer.add_scalar("train/commitment_loss_static", commitment_loss_static, epoch*len(train_loader_src)+step)
-                writer.add_scalar("train/commitment_loss_dynamic", commitment_loss_dynamic, epoch*len(train_loader_src)+step)
-                writer.add_scalar("train/aeloss", aeloss, epoch*len(train_loader_src)+step)
-                writer.add_scalar("train/perceptual_loss", perceptual_loss, epoch*len(train_loader_src)+step)
-                writer.add_scalar("train/gan_feat_loss", gan_feat_loss, epoch*len(train_loader_src)+step)
-                loop.set_description(f'Epoch [{epoch}/{opts.num_epochs}]')
-                loop.set_postfix({'loss_recon': recon_loss.item()})
-            
+                losses_recon.append(recon_loss.item())
+                optimizer_ae.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer_ae)
+                scaler.update()
+                    
+                if dist.get_rank() == 0:
+                    writer.add_scalar("train/recon_loss", recon_loss, epoch*len(train_loader_src)+step)
+                    writer.add_scalar("train/commitment_loss_static", commitment_loss_static, epoch*len(train_loader_src)+step)
+                    writer.add_scalar("train/commitment_loss_dynamic", commitment_loss_dynamic, epoch*len(train_loader_src)+step)
+                    writer.add_scalar("train/aeloss", aeloss, epoch*len(train_loader_src)+step)
+                    writer.add_scalar("train/perceptual_loss", perceptual_loss, epoch*len(train_loader_src)+step)
+                    writer.add_scalar("train/gan_feat_loss", gan_feat_loss, epoch*len(train_loader_src)+step)
+                    loop.set_description(f'Epoch [{epoch}/{opts.num_epochs}]')
+                    loop.set_postfix({'loss_recon': recon_loss.item()})
+
             #==========================discriminator loss src===========================
             if disc_factor > 0:
 
@@ -179,7 +182,6 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
                     writer.add_scalar("train/discloss", discloss, epoch*len(train_loader_src)+step)
                     loop.set_description(f'Epoch [{epoch}/{opts.num_epochs}]')
                     loop.set_postfix({'loss_disc': loss.item()})
-
             #==========================triplet loss src&tar disentangle static=================================
             if triplet_factor > 0:
                 triplet_model.train()
@@ -233,15 +235,14 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
                 model.module.codebook_dynamic.train()
                 model.module.codebook_static.eval()
                 with autocast():
-                    #==========================src data domain=============================
-                    ancher_static, ancher_dynamic = model(inputs_ancher, 2)
-                    pred_domain_src = domain_classifier(ancher_dynamic, domain_label_src)
-                    #==========================tar data domain=============================
-                    ancher_static_tar, ancher_dynamic_tar = model(inputs_anchor_tar, 2)
-                    pred_domain_tar = domain_classifier(ancher_dynamic_tar, domain_label_tar)
-
                     domain_label_src = torch.zeros(inputs_ancher.shape[0]).long().to(local_rank)
                     domain_label_tar = torch.ones(inputs_anchor_tar.shape[0]).long().to(local_rank)
+                    #==========================src data domain=============================
+                    ancher_static, ancher_dynamic = model(inputs_ancher, 2)
+                    pred_domain_src = domain_classifier(ancher_dynamic)
+                    #==========================tar data domain=============================
+                    ancher_static_tar, ancher_dynamic_tar = model(inputs_anchor_tar, 2)
+                    pred_domain_tar = domain_classifier(ancher_dynamic_tar)
 
                     domain_loss_src = criterion_domain(pred_domain_src, domain_label_src)
                     domain_loss_tar = criterion_domain(pred_domain_tar, domain_label_tar)
@@ -263,6 +264,7 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
             #==========================anonymization loss=================================     
             privacy_model.eval()
             fix_model(privacy_model)
+            unfix_model(model)
             model.train()
             model.module.codebook_dynamic.eval()
             model.module.codebook_static.train()
@@ -270,6 +272,8 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
             with autocast():
                 _, recon_anchor, _, _, _ = model(inputs_ancher)
                 output_action = action_model(recon_anchor)
+                B, C, T, H, W = recon_anchor.shape
+                recon_anchor = recon_anchor.permute(0,2,1,3,4).reshape(-1, C, H, W)
                 output_privacy = privacy_model(recon_anchor)
                 loss_action = criterion_action(output_action, action_labels)
                 loss_privacy = criterion_privacy(output_privacy, privacy_labels)
@@ -306,10 +310,11 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
             fix_model(model)
             unfix_model(privacy_model)
 
-
             with autocast():
                 _, recon_anchor, _, _, _ = model(inputs_ancher)
                 output_action = action_model(recon_anchor)
+                B, C, T, H, W = recon_anchor.shape
+                recon_anchor = recon_anchor.permute(0,2,1,3,4).reshape(-1, C, H, W)
                 output_privacy = privacy_model(recon_anchor)
                 loss_action = criterion_action(output_action, action_labels)
                 loss_privacy = criterion_privacy(output_privacy, privacy_labels)
@@ -323,7 +328,6 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
                 optimizer_action.zero_grad()
                 optimizer_privacy.zero_grad()
                 scaler.scale(loss).backward()
-                scaler.step(optimizer_action)
                 scaler.step(optimizer_privacy)
                 scaler.update()
 
@@ -697,7 +701,7 @@ if __name__ == '__main__':
     parser.add_argument("--privacy_pretrained", dest='privacy_pretrained', type=int, required=False, default=1, help='privacy pretrained')
     parser.add_argument("--self_pretrained_action", dest='self_pretrained_action', type=str, required=False, default=None, help='Self pretrained')
     parser.add_argument("--self_pretrained_privacy", dest='self_pretrained_privacy', type=str, required=False, default=None, help='Self pretrained')
-    parser.add_argument("--self_pretrained_vqgan", dest='self_pretrained_vqgan', type=int, required=False, default=None, help='self_pretrained_vqgan')
+    parser.add_argument("--self_pretrained_vqgan", dest='self_pretrained_vqgan', type=str, required=False, default=None, help='self_pretrained_vqgan')
     parser.add_argument("--train_backbone", dest='train_backbone', action='store_true')
     parser.add_argument("--architecture", dest='architecture', type=str, required=True, default='resnet50', help='architecture')
     #=================TRAINING PARAMETERS==========================
@@ -737,9 +741,10 @@ if __name__ == '__main__':
     parser.add_argument('--image_channels', type=int, default=3)
     parser.add_argument('--disc_channels', type=int, default=64)
     parser.add_argument('--disc_layers', type=int, default=3)
-    parser.add_argument('--discriminator_iter_start', type=int, default=10)
+    parser.add_argument('--discriminator_iter_start', type=int, default=200)
     parser.add_argument('--triplet_iter_start', type=int, default=20) # 用于控制什么时候开始使用triplet loss来分离源域和目标域的动态和静态信息
     parser.add_argument('--domain_iter_start', type=int, default=20) # 用于控制什么时候开始使用domain classifier来align源域和目标域的动态信息
+    parser.add_argument('--recon_iter_start', type=int, default=200) # 用于控制什么时候开始使用recon loss来分离源域和目标域的动态和静态信息
     parser.add_argument('--disc_loss_type', type=str, default='hinge', choices=['hinge', 'vanilla'])
     parser.add_argument('--image_gan_weight', type=float, default=1.0)
     parser.add_argument('--video_gan_weight', type=float, default=1.0)
@@ -756,7 +761,7 @@ if __name__ == '__main__':
     seed_everything(1234)
 
     opts = parser.parse_args()
-    opts.run_id = f'VQGAN_minmax_{opts.src}2{opts.tar}_frames_{opts.num_frames}_rate_{opts.sample_every_n_frames}_bs_{opts.batch_size}_lr_ft_{opts.learning_rate_ft}_lr_fb_{opts.learning_rate_fb}_lr_fa_{opts.learning_rate_fa}_privacy_weight_{opts.privacy_weight}_action_weight_{opts.action_weight}'
+    opts.run_id = f'VQGAN_minmax_{opts.src}2{opts.tar}_frames_{opts.num_frames}_rate_{opts.sample_every_n_frames}_bs_{opts.batch_size}_triplet_{opts.triplet_iter_start}_domain_{opts.domain_iter_start}_privacy_weight_{opts.privacy_weight}_action_weight_{opts.action_weight}'
 
 ##########################和DDP有关的参数################################
     local_rank = int(os.getenv("LOCAL_RANK", 0))

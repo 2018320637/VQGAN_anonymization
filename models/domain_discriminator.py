@@ -20,10 +20,12 @@ class DomainDiscriminator(nn.Module):
         super(DomainDiscriminator, self).__init__()
         self.domain_fc = nn.Linear(input_dim, domain_num)
         self.temporal_pool = nn.AdaptiveAvgPool3d((1, None, None))
+        self.spatial_pool = nn.AdaptiveAvgPool2d((1, 1))
         
     def forward(self, x, alpha=0.5):
         # Pooling: B,C,T,H,W -> B,C,H,W
         x = self.temporal_pool(x).squeeze(2) # [b, c, h, w]
+        x = self.spatial_pool(x)
         # Flatten: B,C,H,W -> B,C*H*W
         x = x.view(x.size(0), -1)
         reverse_feature = ReverseLayerF.apply(x, alpha)

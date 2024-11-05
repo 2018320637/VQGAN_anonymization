@@ -1,5 +1,5 @@
 #!/bin/bash
-cd ..
+cd ../..
 OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port 29501 vqgan_pretrain.py \
     --src 'ucf' \
     --tar 'hmdb' \

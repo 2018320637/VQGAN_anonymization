@@ -1,6 +1,6 @@
 #!/bin/bash
-cd ..
-OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=1,2,4,7 torchrun --nproc_per_node 4 --master_port 29506 vqgan_minmax.py \
+cd ../..
+OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,4,5 torchrun --nproc_per_node 4 --master_port 29506 vqgan_minmax.py \
     --src 'hmdb' \
     --tar 'ucf' \
     --num_frames 16 \
@@ -18,6 +18,7 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=1,2,4,7 torchrun --nproc_per_node 4 --mas
     --learning_rate_triplet 0.001 \
     --num_epochs 200 \
     --val_freq 5 \
+    --recon_freq 5 \
     --reso_h 128 \
     --reso_w 128 \
     --triple 1 \

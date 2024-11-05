@@ -142,7 +142,7 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
         #==========================step 1=============================================
         if step % 2 == 0:
             #==========================recon loss src=================================
-            if recon_factor > 0:
+            if recon_factor > 0 and epoch % opts.recon_freq == 0:
                 model.train()
                 unfix_model(model)
                 with autocast():
@@ -719,6 +719,7 @@ if __name__ == '__main__':
     parser.add_argument("--num_epochs", dest='num_epochs', type=int, required=False, default=300, help='Number of epochs')
     parser.add_argument("--num_epoch_eval", dest='num_epoch_eval', type=int, required=False, default=100, help='Epoch eval')
     parser.add_argument("--val_freq", dest='val_freq', type=int, required=False, default=10, help='Validation frequency')
+    parser.add_argument("--recon_freq", dest='recon_freq', type=int, required=False, default=5, help='Reconstruction frequency')
     #=================DATA PARAMETERS==============================
     parser.add_argument("--reso_h", dest='reso_h', type=int, required=False, default=128, help='Resolution height')
     parser.add_argument("--reso_w", dest='reso_w', type=int, required=False, default=128, help='Resolution width')
@@ -761,7 +762,7 @@ if __name__ == '__main__':
     seed_everything(1234)
 
     opts = parser.parse_args()
-    opts.run_id = f'VQGAN_minmax_{opts.src}2{opts.tar}_frames_{opts.num_frames}_rate_{opts.sample_every_n_frames}_bs_{opts.batch_size}_triplet_{opts.triplet_iter_start}_domain_{opts.domain_iter_start}_privacy_weight_{opts.privacy_weight}_action_weight_{opts.action_weight}'
+    opts.run_id = f'VQGAN_minmax_{opts.src}2{opts.tar}_frames_{opts.num_frames}_rate_{opts.sample_every_n_frames}_bs_{opts.batch_size}_triplet_{opts.triplet_iter_start}_domain_{opts.domain_iter_start}_recon_freq{opts.recon_freq}_privacy_weight_{opts.privacy_weight}_action_weight_{opts.action_weight}'
 
 ##########################和DDP有关的参数################################
     local_rank = int(os.getenv("LOCAL_RANK", 0))

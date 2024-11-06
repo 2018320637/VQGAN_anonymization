@@ -1,6 +1,6 @@
 #!/bin/bash
 cd ../..
-OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port 29501 vqgan_minmax.py \
+OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=2,3,4,5 torchrun --nproc_per_node 4 --master_port 29501 vqgan_minmax.py \
     --src 'ucf' \
     --tar 'hmdb' \
     --num_frames 16 \
@@ -18,7 +18,7 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --mas
     --learning_rate_triplet 0.001 \
     --num_epochs 200 \
     --val_freq 5 \
-    --recon_freq 5 \
+    --recon_freq 2 \
     --reso_h 128 \
     --reso_w 128 \
     --triple 1 \
@@ -31,9 +31,9 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --mas
     --disc_channels 64 \
     --disc_layers 3 \
     --discriminator_iter_start 200 \
-    --recon_iter_start 0 \
-    --triplet_iter_start 15 \
-    --domain_iter_start 25 \
+    --recon_iter_start 2 \
+    --triplet_iter_start 0 \
+    --domain_iter_start 0 \
     --disc_loss_type hinge \
     --image_gan_weight 1.0 \
     --video_gan_weight 1.0 \

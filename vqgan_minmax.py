@@ -167,7 +167,8 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
 
             #==========================discriminator loss src===========================
             if disc_factor > 0:
-
+                model.train()
+                unfix_model(model)
                 with autocast():
                     discloss = model(inputs_ancher, 1)
                     loss = disc_factor * discloss
@@ -185,8 +186,9 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
             #==========================triplet loss src&tar disentangle static=================================
             if triplet_factor > 0:
                 triplet_model.train()
-                unfix_model(triplet_model)
                 domain_classifier.train()
+                unfix_model(triplet_model)
+                unfix_model(model)
                 unfix_model(domain_classifier)
                 model.train()
                 model.module.codebook_dynamic.eval()
@@ -232,16 +234,17 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
                 domain_classifier.train()
                 unfix_model(domain_classifier)
                 model.train()
+                unfix_model(model)
                 model.module.codebook_dynamic.train()
                 model.module.codebook_static.eval()
                 with autocast():
                     domain_label_src = torch.zeros(inputs_ancher.shape[0]).long().to(local_rank)
                     domain_label_tar = torch.ones(inputs_anchor_tar.shape[0]).long().to(local_rank)
                     #==========================src data domain=============================
-                    ancher_static, ancher_dynamic = model(inputs_ancher, 2)
+                    _, ancher_dynamic = model(inputs_ancher, 2)
                     pred_domain_src = domain_classifier(ancher_dynamic)
                     #==========================tar data domain=============================
-                    ancher_static_tar, ancher_dynamic_tar = model(inputs_anchor_tar, 2)
+                    _, ancher_dynamic_tar = model(inputs_anchor_tar, 2)
                     pred_domain_tar = domain_classifier(ancher_dynamic_tar)
 
                     domain_loss_src = criterion_domain(pred_domain_src, domain_label_src)
@@ -262,8 +265,10 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
                     loop.set_description(f'Epoch [{epoch}/{opts.num_epochs}]')
                     loop.set_postfix({'loss_domain': domain_loss.item()})
             #==========================anonymization loss=================================     
+            action_model.eval()
             privacy_model.eval()
             fix_model(privacy_model)
+            fix_model(action_model)
             unfix_model(model)
             model.train()
             model.module.codebook_dynamic.eval()
@@ -282,12 +287,12 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
                 losses_privacy.append(loss_privacy.item())
                 losses_anonymized.append(loss_anonymized.item())
 
-                optimizer_ae.zero_grad()
-                optimizer_action.zero_grad()
-                optimizer_privacy.zero_grad()
-                scaler.scale(loss_anonymized).backward()
-                scaler.step(optimizer_ae)
-                scaler.update()
+            optimizer_ae.zero_grad()
+            optimizer_action.zero_grad()
+            optimizer_privacy.zero_grad()
+            scaler.scale(loss_anonymized).backward()
+            scaler.step(optimizer_ae)
+            scaler.update()
 
             if dist.get_rank() == 0:
                 writer.add_scalar(f'Training loss_fa', loss_anonymized.item(), epoch * total_iters + step)
@@ -307,9 +312,10 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
 
             model.eval()
             privacy_model.train()
+            action_model.train()
             fix_model(model)
             unfix_model(privacy_model)
-
+            unfix_model(action_model)
             with autocast():
                 _, recon_anchor, _, _, _ = model(inputs_ancher)
                 output_action = action_model(recon_anchor)
@@ -324,12 +330,12 @@ def train_epoch_minmax(model, action_model, privacy_model, triplet_model, domain
                 losses_privacy.append(loss_privacy.item())
                 losses_anonymized.append(loss_anonymized.item())
 
-                optimizer_ae.zero_grad()
-                optimizer_action.zero_grad()
-                optimizer_privacy.zero_grad()
-                scaler.scale(loss).backward()
-                scaler.step(optimizer_privacy)
-                scaler.update()
+            optimizer_ae.zero_grad()
+            optimizer_action.zero_grad()
+            optimizer_privacy.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer_privacy)
+            scaler.update()
 
             if dist.get_rank() == 0:
                 writer.add_scalar(f'Training loss_fa', loss_anonymized.item(), epoch * total_iters + step)
@@ -622,18 +628,13 @@ def train_minmax(opts, local_rank):
     privacy_model = DDP(privacy_model, device_ids=[local_rank], output_device=local_rank,broadcast_buffers=False)
     triplet_model = DDP(triplet_model, device_ids=[local_rank], output_device=local_rank,broadcast_buffers=False)
     domain_classifier = DDP(domain_classifier, device_ids=[local_rank], output_device=local_rank,broadcast_buffers=False)
-    # fix action model all the time
-    action_model.eval()
-    fix_model(action_model)
 
     #=================================optimizer============================================
     optimizer_ae = torch.optim.Adam(list(model.module.encoder.parameters()) +
                             list(model.module.decoder.parameters()) +
                             list(model.module.pre_vq_conv_dynamic.parameters()) +
                             list(model.module.pre_vq_conv_static.parameters()) +
-                            list(model.module.post_vq_conv.parameters()) +
-                            list(model.module.codebook_dynamic.parameters()) +
-                            list(model.module.codebook_static.parameters()),
+                            list(model.module.post_vq_conv.parameters()),
                             lr=opts.learning_rate_fa, betas=(0.5, 0.9))
     
     optimizer_disc = torch.optim.Adam(list(model.module.image_discriminator.parameters()) +
@@ -762,7 +763,7 @@ if __name__ == '__main__':
     seed_everything(1234)
 
     opts = parser.parse_args()
-    opts.run_id = f'VQGAN_minmax_{opts.src}2{opts.tar}_frames_{opts.num_frames}_rate_{opts.sample_every_n_frames}_bs_{opts.batch_size}_triplet_{opts.triplet_iter_start}_domain_{opts.domain_iter_start}_recon_freq{opts.recon_freq}_privacy_weight_{opts.privacy_weight}_action_weight_{opts.action_weight}'
+    opts.run_id = f'VQGAN_minmax_222_{opts.src}2{opts.tar}_frames_{opts.num_frames}_rate_{opts.sample_every_n_frames}_bs_{opts.batch_size}_triplet_{opts.triplet_iter_start}_domain_{opts.domain_iter_start}_recon_freq{opts.recon_freq}_w_pri_{opts.privacy_weight}_w_act_{opts.action_weight}'
 
 ##########################和DDP有关的参数################################
     local_rank = int(os.getenv("LOCAL_RANK", 0))
